@@ -1,4 +1,5 @@
 import numpy as np
+from enum import Enum
 
 def project_box(x, lb, ub):
     if lb is not None: x = np.maximum(x, lb)
@@ -21,7 +22,7 @@ def grp_soft_threshold(x, groups, thresh):
     return x_new
 
 
-class PDHGStatus:
+class PDHGStatus(Enum):
     OPTIMAL: 0
     MAX_ITER: 1
     INFEASIBLE: 2
