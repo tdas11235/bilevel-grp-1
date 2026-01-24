@@ -20,6 +20,7 @@ class BilevelProblem:
         # build symbolic structure
         self._build_symbolic()
         self._build_grad_Lz()
+        self._build_grad_Lx()
 
     def A_sym(self, z):
         """
