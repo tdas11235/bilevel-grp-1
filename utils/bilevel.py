@@ -5,7 +5,7 @@ import casadi as ca
 class BilevelProblem:
     def __init__(self, z_min, z_max, nx, c, m, l):
         """
-        q_min, q_max : box constraints on q
+        z_min, z_max : box constraints on z
         nx           : dimension of x
         m            : number of inequality constraints (rows of A)
         l            : number of equality constraints (rows of P)
