@@ -43,6 +43,12 @@ class GAPTRSolver:
         self.eps = eps
         self.kappa = kappa
         self.eps_on = eps_on
+        self.max_iter = max_iter,
+        self.t_min = t_min
+        self.damp = damp
+        self.amp = amp
+        self.switch_ratio = switch_ratio
+        self.verbose = verbose
         # internal global states
         self.restore_count = 0
         self.tol_mode = False
@@ -53,5 +59,20 @@ class GAPTRSolver:
     
     def _effective_gradient(self, z, g):
         g_eff = np.where(
-            
+            z <= self.problem.z_min + 1e-14, np.minimum(g, 0.0),
+            np.where(z >= self.problem.z_max - 1e-14, np.maximum(g, 0.0), g)
         )
+        return g_eff
+    
+    def _is_stationary(self, g_eff, z, fval):
+        check1 = np.linalg.norm(g_eff) < self.eps
+        if check1:
+            return check1
+        check2 = self.tol_mode and np.linalg.norm(
+            g_eff) / max(1.0, np.abs(fval), np.linalg.norm(z)) < self.eps
+        if check2:
+            print("Reached stationary point within acceptable tolerance.")
+        return check1 or check2
+    
+    def step(self):
+        return StepStatus.ACCEPTED
