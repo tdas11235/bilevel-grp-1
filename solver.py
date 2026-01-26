@@ -5,7 +5,7 @@ from utils.group import PDHGStatus
 from utils.act import update_active_groups
 
 
-class StepStatus:
+class StepStatus(Enum):
     ACCEPTED = 0
     RESTART = 1
     TERMINATE = 2
@@ -67,6 +67,7 @@ class GAPTRSolver:
         self.tol_mode = False
         self.min_g = np.inf
         self.active_prev = None
+        self.x0 = 0.5 * np.ones(self.problem.nx)
         self.sol = TerminatedPoint.empty()
     
     def _project_box(self, z):
@@ -74,8 +75,8 @@ class GAPTRSolver:
     
     def _effective_gradient(self, z, g):
         g_eff = np.where(
-            z <= self.problem.z_min + 1e-14, np.minimum(g, 0.0),
-            np.where(z >= self.problem.z_max - 1e-14, np.maximum(g, 0.0), g)
+            z <= self.problem.z_min + 1e-6, np.minimum(g, 0.0),
+            np.where(z >= self.problem.z_max - 1e-6, np.maximum(g, 0.0), g)
         )
         return g_eff
     
@@ -100,9 +101,10 @@ class GAPTRSolver:
         P = np.asarray(self.problem.eval_P(z))
         r = np.asarray(self.problem.eval_r(z)).flatten()
         # step 1: Inner problem solve
-        status, fval, x, lam, nu = self.pdhg.solve(A, b, P, r)
+        status, fval, x, lam, nu = self.pdhg.solve(A, b, P, r, x0=self.x0)
         if status != PDHGStatus.OPTIMAL: raise RuntimeError(f"PDHG solver failed with status {status}")
         self.last_x = x
+        self.x0 = x
         self.last_lam = lam
         self.last_nu = nu
         self.last_fval = fval
@@ -154,11 +156,12 @@ class GAPTRSolver:
             b_t = np.asarray(self.problem.eval_b(z_trial)).flatten()
             P_t = np.asarray(self.problem.eval_P(z_trial))
             r_t = np.asarray(self.problem.eval_r(z_trial)).flatten()
-            status_t, f_t, x_t, lam_t, nu_t = self.pdhg.solve(A_t, b_t, P_t, r_t)
+            status_t, f_t, x_t, lam_t, nu_t = self.pdhg.solve(A_t, b_t, P_t, r_t, x0=self.x0)
             if status_t != PDHGStatus.OPTIMAL:
                 print("Infeasible problem detected!")
                 t *= self.beta
                 continue
+            self.x0 = x_t
             delta_m = -np.dot(g_eff, dz_eff)
             if abs(delta_m) >= self.tau:
                 rho = (fval - f_t) / delta_m
@@ -208,15 +211,17 @@ class GAPTRSolver:
                 self.restore_count += 1
                 if (k >= self.switch_ratio * self.max_iter):
                     self.tol_mode = True
-                z_rest, _, _, stat = self.restoration.solve(
-                    y_k=self.z, q_init=self.z
+                z_rest, x, _, stat = self.restoration.solve(
+                    y_k=self.z, z_init=self.z
                 )
                 if z_rest is None:
                     raise RuntimeError("Restoration failed.")
                 self.z = self._project_box(z_rest)
+                self.x0 = x
                 self.delta = self.delta0
                 self.active_prev = None
                 continue
             if status == StepStatus.TERMINATE:
                 break
+        # print(self.min_g)
         return self.sol

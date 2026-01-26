@@ -23,9 +23,9 @@ def grp_soft_threshold(x, groups, thresh):
 
 
 class PDHGStatus(Enum):
-    OPTIMAL: 0
-    MAX_ITER: 1
-    INFEASIBLE: 2
+    OPTIMAL = 0
+    MAX_ITER = 1
+    INFEASIBLE = 2
 
 
 class GroupPDHG:
@@ -42,7 +42,7 @@ class GroupPDHG:
             lb_x=None, ub_x=None,
             tau=1e-2, sigma=1e-2, theta=1.0, max_iter=5000, 
             tol=1e-6, tol_cons=1e-6, dual_max=1e6, 
-            verbose=False
+            verbose=True
     ):
         self.c = np.asarray(c)
         self.groups = groups
@@ -64,7 +64,7 @@ class GroupPDHG:
         if P is None:
             P = np.zeros((0, n))
             r = np.zeros(n)
-        p = P.shape
+        p = P.shape[0]
         # initialization
         if x0 is None: x = np.zeros(n)
         else: x = x0.copy()
@@ -101,7 +101,16 @@ class GroupPDHG:
             dlam = np.linalg.norm(lam - lam_old)
             dnu = np.linalg.norm(nu - nu_old)
             x = x_new
-            if max(dx, dlam, dnu) < self.tol:
+            fval = (
+                self.c @ x
+                + self.mu * sum(np.linalg.norm(x[G]) for G in self.groups)
+            )
+            # print(fval, dx, dlam, dnu)
+            ineq_violation = np.linalg.norm(np.maximum(A @ x - b, 0.0), np.inf)
+            eq_violation = (
+                np.linalg.norm(P @ x - r, np.inf) if p > 0 else 0.0
+            )
+            if max(dx, dlam, dnu) < self.tol and max(ineq_violation, eq_violation) <= self.tol_cons:
                 status = PDHGStatus.OPTIMAL
                 if self.verbose:
                     print(f"PDHG converged in {k} iterations")
@@ -120,4 +129,5 @@ class GroupPDHG:
             self.c @ x
             + self.mu * sum(np.linalg.norm(x[G]) for G in self.groups)
         )
+        print(status)
         return status, fval, x, lam, nu
