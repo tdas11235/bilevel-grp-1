@@ -124,6 +124,7 @@ class GroupPDHG:
             if max(ineq_violation, eq_violation) > self.tol_cons:
                 status = PDHGStatus.INFEASIBLE
                 if self.verbose:
+                    print(max(ineq_violation, eq_violation))
                     print("PDHG infeasible: constraint violation after max_iter")
         fval = (
             self.c @ x

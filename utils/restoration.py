@@ -3,7 +3,11 @@ import numpy as np
 
 
 class RestorationNLP:
-    def __init__(self, problem, rho, verbose=True):
+    def __init__(
+            self, problem, rho,
+            lb_x=None, ub_x=None,
+            verbose=True
+        ):
         """
         problem:    BilevelProblem instance
         rho:        Regularization parameter
@@ -11,6 +15,11 @@ class RestorationNLP:
         self.problem = problem
         self.rho = rho
         self.verbose = verbose
+        nx = self.problem.nx
+        if lb_x is None: self.lb_x = np.zeros(nx)
+        else: self.lb_x = lb_x = np.asarray(lb_x).reshape(-1)
+        if ub_x is None: self.ub_x = np.inf * np.ones(nx)
+        else: self.ub_x = ub_x = np.asarray(ub_x).reshape(-1)
         self._build_solver()
 
     def _build_solver(self):
@@ -46,12 +55,12 @@ class RestorationNLP:
         ])
         self.lbx = np.concatenate([
             self.problem.z_min,
-            np.zeros(nx),
+            self.lb_x,
             [-np.inf]
         ])
         self.ubx = np.concatenate([
             self.problem.z_max,
-            np.inf * np.ones(nx),
+            self.ub_x,
             [0.0]
         ])
         # solver objects

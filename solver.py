@@ -67,7 +67,6 @@ class GAPTRSolver:
         self.tol_mode = False
         self.min_g = np.inf
         self.active_prev = None
-        self.x0 = 0.5 * np.ones(self.problem.nx)
         self.sol = TerminatedPoint.empty()
     
     def _project_box(self, z):
@@ -197,7 +196,9 @@ class GAPTRSolver:
         self.active_prev = active_t.copy()
         return StepStatus.ACCEPTED
     
-    def solve(self, z0):
+    def solve(self, z0, x0=None):
+        if x0 is None: self.x0 = 0.5 * np.ones(self.problem.nx)
+        else: self.x0 = x0
         self.z = self._project_box(np.asarray(z0, dtype=float))
         self.delta = self.delta0
         self.active_prev = None
