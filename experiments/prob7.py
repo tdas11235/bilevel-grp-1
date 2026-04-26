@@ -120,6 +120,8 @@ solver = GAPTRSolver(
 )
 
 z0 = 2.0 * np.ones(nz)
+x0 = np.ones(nx) * 50
+z0, x0 = restoration.warm_start(z0, x0, 10)
 z0, x0, _, status = restoration.solve(y_k=z0, z_init=z0)
 print(x0)
 sol = solver.solve(z0, x0=x0)

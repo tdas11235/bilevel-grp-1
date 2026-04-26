@@ -11,10 +11,10 @@ from utils.group import GroupPDHG
 
 nx, nz = 4, 2
 groups = [[0, 1], [2, 3]]
-mu = 0.01
-# mu = 1.0  # try this
-c = np.array([0.0, 0.0, 0.0, 0.0])
-# c = np.array([0.1, 0.1, 0.1, 0.1])    # try this
+# mu = 0.01
+mu = 1.0  # try this
+# c = np.array([0.0, 0.0, 0.0, 0.0])
+c = np.array([0.1, 0.1, 0.1, 0.1])    # try this
 
 # switching constraints problem
 class Prob3(BilevelProblem):

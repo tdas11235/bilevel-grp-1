@@ -15,7 +15,7 @@ c = np.array([1.0, 1.0, 0.0, 0.0])
 mu = 1.0
 
 # rotational stress problem
-class Prob3(BilevelProblem):
+class Prob4(BilevelProblem):
     def __init__(self, mu=0.1): # Lower mu so x wants to move
         nx, nz = 4, 1
         self.groups = [[0, 1], [2, 3]]
