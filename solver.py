@@ -1,3 +1,4 @@
+import cvxpy as cp
 import numpy as np
 from enum import Enum
 from dataclasses import dataclass
@@ -45,7 +46,9 @@ class GAPTRSolver:
             damp_warm=0.7, amp_warm=1.1, warmup_iters=30,
             gamma_f=1e-5, gamma_theta=1e-7, filter_max_size=50,
             memory_len=10, escape_radius=1e-3,
-            switch_grad_ratio=0.9, verbose=False 
+            switch_grad_ratio=0.9, 
+            boundary_tol=1e-3, grad_memory_len=10, persist_threshold=2,
+            grad_boundary_tol=1e-4, verbose=False 
     ):
         """
         :param problem: BilevelProblem
@@ -80,6 +83,10 @@ class GAPTRSolver:
         self.memory_len = memory_len
         self.escape_radius = escape_radius
         self.switch_grad_ratio = switch_grad_ratio
+        self.boundary_tol = boundary_tol
+        self.grad_memory_len = grad_memory_len
+        self.persist_threshold = persist_threshold
+        self.grad_boundary_tol = grad_boundary_tol
         self.verbose = verbose
         # internal global states
         self.restore_count = 0
@@ -90,6 +97,8 @@ class GAPTRSolver:
         self.recent_z = []
         self.filter = []
         self.recent_switches = []
+        self.recent_gradients = []
+        self.manifold_persist_count = 0
     
     def _project_box(self, z):
         return np.clip(z, self.problem.z_min, self.problem.z_max)
@@ -110,6 +119,82 @@ class GAPTRSolver:
         if check2:
             print("Reached stationary point within acceptable tolerance.")
         return check1 or check2
+    
+    def _near_switching_boundary(self, active, gnorms):
+        """
+        Returns True if at least one group is switches
+        Based on one-sided hysteresis of (mu - eps_off) deactivation
+        """
+        for i, gn in enumerate(gnorms):
+            if active[i]:
+                # close to deactivation boundary
+                if abs(gn - (self.inner.mu - self.eps_off)) <= self.boundary_tol:
+                    return True
+            else:
+                # close to activation boundary
+                if abs(gn - self.inner.mu) <= self.boundary_tol:
+                    return True
+        return False
+    
+    def _record_gradient(self, g_eff, same_active):
+        """
+        Store necessary manifold gradients only
+        """
+        if same_active:
+            self.manifold_persist_count += 1
+        else:
+            self.manifold_persist_count = 0
+        small_grad = (
+            np.linalg.norm(g_eff) <= self.grad_boundary_tol
+        )
+        if (
+            self.manifold_persist_count >= self.persist_threshold
+            or small_grad
+        ):
+            self.recent_gradients.append(g_eff.copy())
+            if len(self.recent_gradients) > self.grad_memory_len:
+                self.recent_gradients.pop(0)
+        
+    def _minimum_norm_subgradient(self, g_current):
+        """
+        Minimum gradient from history based convex hull
+        Solve:
+
+        min || sum_i alpha_i g_i ||^2
+        s.t.
+            alpha_i >= 0
+            sum alpha_i = 1
+
+        Small dense QP in gradient space.
+        """
+        grads = [g_current.copy()]
+        for g in self.recent_gradients:
+            grads.append(g.copy())
+        G = np.column_stack(grads)   # shape: (nz, m)
+        m = G.shape[1]
+        # QP:
+        # min 0.5 * alpha^T H alpha
+        # where H = G^T G
+        H = G.T @ G + 1e-10 * np.eye(m)
+        try:
+            alpha = cp.Variable(m)
+            objective = cp.Minimize(
+                0.5 * cp.quad_form(alpha, H)
+            )
+            constraints = [
+                alpha >= 0,
+                cp.sum(alpha) == 1
+            ]
+            prob = cp.Problem(objective, constraints)
+            prob.solve(warm_start=True, verbose=False)
+            if alpha.value is None:
+                return g_current.copy()
+            alpha_val = np.asarray(alpha.value).flatten()
+            g_min = G @ alpha_val
+            return g_min
+        except Exception:
+            # safe fallback
+            return g_current.copy()
 
     def _constraint_violation(self, z, x):
         A = np.asarray(self.problem.eval_A(z))
@@ -227,6 +312,23 @@ class GAPTRSolver:
         # step 2: stationarity check
         g = self.problem.grad_Lz(z, x, lam, nu)
         g_eff = self._effective_gradient(z, g)
+        # step 3: Group activation test
+        grad_x = self.problem.grad_Lx(z, x, lam, nu)
+        active, gnorms = update_active_groups(
+            grad_x, self.groups, self.inner.mu,
+            self.active_prev, self.eps_off
+        )
+        same_active_now = (
+            self.active_prev is not None
+            and np.array_equal(active, self.active_prev)
+        )
+        self._record_gradient(
+            g_eff,
+            same_active_now
+        )
+        ## minimum norm subgrad for manifold boundaries
+        if self._near_switching_boundary(gnorms):
+            g_eff = self._minimum_norm_subgradient(g_eff)
         if self._is_stationary(g_eff, z, fval):
             self.sol = TerminatedPoint(
                 z=z.copy(),
@@ -237,7 +339,7 @@ class GAPTRSolver:
             )
             print("Stationary point reached!")
             return StepStatus.TERMINATE
-        # step 3: descent direction
+        # step 4: descent direction
         norm_g = np.linalg.norm(g_eff)
         self.min_g = min(self.min_g, norm_g)
         ## for projected descent, use this
@@ -248,13 +350,7 @@ class GAPTRSolver:
             self.problem.z_min - z,
             self.problem.z_max - z
         )
-        # step 4: Group activation test
-        grad_x = self.problem.grad_Lx(z, x, lam, nu)
-        active, _ = update_active_groups(
-            grad_x, self.groups, self.inner.mu, 
-            self.active_prev, self.eps_off
-        )
-        # step-5: Acceptance loop
+        # step 5: Acceptance loop
         t = self.delta
         accepted = False
         while t > self.t_min:
