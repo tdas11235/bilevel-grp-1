@@ -80,6 +80,35 @@ class GroupPDHG:
         self.dual_max = dual_max
         self.verbose = verbose
 
+    def _estimate_operator_norm(self, A, P=None, n_iter=30):
+        """
+        Estimates spectral norm ||K|| where K = [A; P]
+        using power iteration.
+        """
+        n = A.shape[1]
+        if P is None or P.shape[0] == 0:
+            def K(x):
+                return A @ x
+            def KT(y):
+                return A.T @ y
+        else:
+            def K(x):
+                return np.concatenate([A @ x, P @ x])
+            def KT(y):
+                mA = A.shape[0]
+                return A.T @ y[:mA] + P.T @ y[mA:]
+        x = np.random.randn(n)
+        x /= np.linalg.norm(x) + 1e-12
+        for _ in range(n_iter):
+            y = K(x)
+            x_new = KT(y)
+            norm = np.linalg.norm(x_new) + 1e-12
+            x = x_new / norm
+        # Rayleigh quotient gives squared norm of K
+        y = K(x)
+        Ky = KT(y)
+        return np.sqrt(np.dot(x, Ky))
+
     def solve(self, A, b, P=None, r=None, x0=None, lam0=None, nu0=None):
         n = self.c.size
         m = A.shape[0]
@@ -99,9 +128,9 @@ class GroupPDHG:
             # dual update
             lam_old = lam.copy()
             nu_old = nu.copy()
-            # L = estimate_operator_norm(A)  # or power iteration approx
-            # tau = 0.9 / L
-            # sigma = 0.9 / L
+            L = estimate_operator_norm(A)  # or power iteration approx
+            self.tau = 0.9 / L
+            self.sigma = 0.9 / L
             lam += self.sigma * (A @ x_bar - b)
             lam = np.maximum(lam, 0.0)
             if p > 0: nu += self.sigma * (P @ x_bar - r)
