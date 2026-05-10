@@ -72,7 +72,8 @@ class GAPTRSolver:
             memory_len=10, escape_radius=1e-3,
             switch_grad_ratio=0.9, 
             boundary_tol=1e-3, grad_memory_len=20, persist_threshold=4,
-            grad_boundary_tol=1e-4, perturb_chances=3, verbose=False 
+            grad_boundary_tol=1e-4, perturb_chances=3, 
+            gamma_restore=1e-4, verbose=False 
     ):
         """
         :param problem: BilevelProblem
@@ -112,6 +113,7 @@ class GAPTRSolver:
         self.persist_threshold = persist_threshold
         self.grad_boundary_tol = grad_boundary_tol
         self.perturb_chances = perturb_chances
+        self.gamma_restore = gamma_restore
         self.verbose = verbose
         # internal global states
         self.restore_count = 0
@@ -128,6 +130,11 @@ class GAPTRSolver:
         self.manifold_persist_count = 0
         self.acceptable_points = []
         self.last_restart_basin = None
+        self.filter_restore = []
+        self.delta_max = 1e2
+        self.delta_min = 1e-5
+        self.lam0 = None
+        self.nu0 = None
     
     def _project_box(self, z):
         return np.clip(z, self.problem.z_min, self.problem.z_max)
@@ -283,7 +290,7 @@ class GAPTRSolver:
                     max(1.0, np.linalg.norm(z)))
             if np.linalg.norm(z - z_old) / max(1.0, np.linalg.norm(z)) < self.escape_radius:
                 return True
-        print(m)
+        # print(m)
         return False
     
     def _recently_restored(self, z):
@@ -293,7 +300,7 @@ class GAPTRSolver:
                     max(1.0, np.linalg.norm(z)))
             if np.linalg.norm(z - z_old) / max(1.0, np.linalg.norm(z)) < self.escape_radius:
                 return True
-        print(m)
+        # print(m)
         return False
     
     def _record_visit(self, z):
@@ -367,7 +374,7 @@ class GAPTRSolver:
         P = np.asarray(self.problem.eval_P(z))
         r = np.asarray(self.problem.eval_r(z)).flatten()
         # step 1: Inner problem solve
-        status, fval, x, lam, nu = self.inner.solve(A, b, P, r, x0=self.x0)
+        status, fval, x, lam, nu = self.inner.solve(A, b, P, r, x0=self.x0, lam0=self.lam0, nu0=self.nu0)
         if status != InnerStatus.OPTIMAL: raise RuntimeError(f"Inner solver failed with status {status}")
         self.last_x = x
         self.last_lam = lam
@@ -442,7 +449,7 @@ class GAPTRSolver:
             b_t = np.asarray(self.problem.eval_b(z_trial)).flatten()
             P_t = np.asarray(self.problem.eval_P(z_trial))
             r_t = np.asarray(self.problem.eval_r(z_trial)).flatten()
-            status_t, f_t, x_t, lam_t, nu_t = self.inner.solve(A_t, b_t, P_t, r_t, x0=self.x0)
+            status_t, f_t, x_t, lam_t, nu_t = self.inner.solve(A_t, b_t, P_t, r_t, x0=self.x0, lam0=self.lam0, nu0=self.nu0)
             ## handle infeasibility
             if status_t != InnerStatus.OPTIMAL:
                 print("Infeasible problem detected!")
@@ -485,60 +492,87 @@ class GAPTRSolver:
         self.z = z_trial
         self.active_prev = active_t.copy()
         self.x0 = x_t
+        self.lam0 = lam_t
+        self.nu0 = nu_t
         self._record_visit(self.z)
         self._record_acceptable_point(
             z, x, lam, nu, fval, theta, g_eff, self.current_iter
         )
         self.stuck_count = 0
         return StepStatus.ACCEPTED
+
+    def _violation(self, z, x):
+        A_z = self.problem.A_sym(z)
+        b_z = self.problem.b_sym(z)
+        P_z = self.problem.P_sym(z)
+        r_z = self.problem.r_sym(z)
+        ineq_violation = np.linalg.norm(
+            np.maximum(A_z @ x - b_z, 0.0), np.inf)
+        eq_violation = np.linalg.norm(P_z @ x - r_z, np.inf)
+        return np.maximum(ineq_violation, np.abs(eq_violation))
+
+    def _is_acceptable_restore(self, theta, t):
+        for (theta_f, t_f) in self.filter_restore:
+            if theta >= (1 - self.gamma_restore) * theta_f and t >= (1 - self.gamma_restore) * t_f:
+                return False
+        return True
     
+    def _update_filter_restore(self, theta, t):
+        new_filter = []
+        for (theta_f, t_f) in self.filter_restore:
+            # remove dominated entries
+            if not (theta <= theta_f and t <= t_f):
+                new_filter.append((theta_f, t_f))
+        new_filter.append((theta, t))
+        self.filter_restore = new_filter.copy()
+    
+    def _update_delta_restore(self, delta, accepted):
+        if accepted:
+            return min(delta * 1.5, self.delta_max)
+        else:
+            return max(delta * 0.5, self.delta_min)
+
     def _warm_start(self):
-        prev = np.inf
+        status = False
         delta = self.delta_warm
         z0, x0 = self.z, self.last_x
-        delta_min = getattr(self, "delta_min", 1e-8)
-        delta_max = getattr(self, "delta_max", 1e2)
-        stall_count = 0
+        self.filter_restore = []
+        theta0 = self._violation(z0, x0)
+        self.filter_restore.append((theta0, theta0))
         for wk in range(self.warmup_iters):
-            z1, x1, _ = self.restoration.warm_start(z_ref=z0, x_ref=x0,
+            # SLP step
+            z1, x1, t_pred = self.restoration.warm_start(z_ref=z0, x_ref=x0,
                                                         delta=delta)
-            A_z = self.problem.A_sym(z1)
-            b_z = self.problem.b_sym(z1)
-            P_z = self.problem.P_sym(z1)
-            r_z = self.problem.r_sym(z1)
-            ineq_violation = np.linalg.norm(
-                np.maximum(A_z @ x1 - b_z, 0.0), np.inf)
-            eq_violation = np.linalg.norm(P_z @ x1 - r_z, np.inf)
-            total_violation = ineq_violation + eq_violation
-            improvement = prev - total_violation
-            improved = total_violation < prev
-            stalled = improvement < 1e-5
+            
+            theta = self._violation(z1, x1)
             print(
-                f"    Warmup iter {wk}: "
-                f"ineq = {ineq_violation:.6f}, "
-                f"eq = {eq_violation:.6f}, "
-                f"total = {total_violation:.6f}, "
-                f"delta = {delta:.3e}"
+                f"Warmup {wk}: theta = {theta:.6e}, "
+                f"t_pred = {t_pred:.6e}, delta = {delta:.2e}"
             )
-            # convergence
-            # ---- accept iterate if better ----
-            if improved:
+            # --- filter acceptance ---
+            accepted = self._is_acceptable_restore(theta, t_pred)
+            # --- SOC (RHS-based) ---
+            if not accepted and t_pred < 1e-6:
+                x_soc, t_soc = self.restoration._soc_rhs(z0, x0, z1, x1, delta)
+                theta_soc = self._violation(z1, x_soc)
+                if self._is_acceptable_restore(theta_soc, t_soc):
+                    x1 = x_soc
+                    theta = theta_soc
+                    t_pred = t_soc
+                    accepted = True
+                    print("    SOC accepted (RHS correction)")
+            # --- accept / reject ---
+            if accepted:
                 z0, x0 = z1, x1
-                prev = total_violation
-            # ---- update stall counter ----
-            if stalled:
-                stall_count += 1
-            else:
-                stall_count = 0
-            # ---- delta update logic ----
-            if improved and not stalled:
-                # good progress -> shrink
-                delta *= self.damp_warm
-            else:
-                # either no improvement OR weak improvement -> expand
-                delta *= self.amp_warm
-            delta = np.clip(delta, delta_min, delta_max)
-        return z0, x0
+                self._update_filter_restore(theta, t_pred)
+            # --- trust region update ---
+            delta = self._update_delta_restore(delta, accepted)
+            # --- convergence ---
+            if theta < 1e-6:
+                status = True
+                print("Warm start converged")
+                break
+        return z0, x0, status
     
     def _best_acceptable_point(self):
         if not self.acceptable_points:
@@ -580,17 +614,13 @@ class GAPTRSolver:
             if status == StepStatus.RESTART:
                 self.stuck_count += 1
                 print("Restart triggered.")
-                if (k >= self.switch_ratio * self.max_iter):
-                    self.tol_mode = True
-                self.restore_count += 1
-                z_rest, x = self._warm_start()
-                if z_rest is None:
-                    raise RuntimeError("Restoration failed.")
+                z_rest, x, success = self._warm_start()
+                if not success:
+                    print("Failed to recover. Restoration failed at first step.")
+                    break
+                    # raise RuntimeError("Restoration failed.")
                 # try noise perturbation to escape the basin
-                stuck = (
-                    self._recently_visited(z_rest) or
-                    self._recently_restored(z_rest)
-                ) and self.stuck_count >= 2
+                stuck = self.stuck_count >= 2
                 if stuck:
                     print("Failed to find new point. Starting noise perturbation ...")
                     A = np.asarray(self.problem.eval_A(z_rest))
@@ -609,9 +639,10 @@ class GAPTRSolver:
                     for attempt in range(self.perturb_chances):
                         self.z = self._escape_perturb(z_rest, attempt)
                         self.x0 = 0.5 * np.ones(self.problem.nx)
-                        z_rest, x = self._warm_start()
-                        if z_rest is None:
-                            raise RuntimeError("Restoration failed.")
+                        z_rest, x, success = self._warm_start()
+                        if not success:
+                            print(f"Failed to recover. Restoration failed in {attempt+1}/{self.perturb_chances}.")
+                            # raise RuntimeError("Restoration failed.")
                         A = np.asarray(self.problem.eval_A(z_rest))
                         b = np.asarray(self.problem.eval_b(z_rest)).flatten()
                         P = np.asarray(self.problem.eval_P(z_rest))
@@ -629,6 +660,7 @@ class GAPTRSolver:
                             self.last_restart_basin is not None
                             and np.array_equal(active_rest, self.last_restart_basin)
                         )
+                        print("Same Basin detected: ", same_basin)
                         if not (self._recently_visited(z_rest) or self._recently_restored(z_rest)) and not same_basin:
                             break
                     else:
@@ -637,6 +669,8 @@ class GAPTRSolver:
                 self.z = self._project_box(z_rest)
                 self._record_restore(self.z)
                 self.x0 = x
+                self.lam0 = None
+                self.nu0 = None
                 self.delta = self.delta0
                 self.active_prev = None
                 continue

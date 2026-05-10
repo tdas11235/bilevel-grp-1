@@ -10,7 +10,8 @@ from utils.group import GroupSOCP, GroupPDHG
 import time
 
 # mu=1.0, tol, cons_tol=1e-3 for pdhg
-mu = 10.0
+# mu = 50.0
+mu = 0.1
 np.random.seed(0)
 nx = 500
 nz = 50
@@ -77,12 +78,10 @@ pdhg = GroupPDHG(
     mu=mu,
     lb_x=lb_x,
     ub_x=ub_x,
-    tau=5e-3,
-    sigma=5e-3,
     theta=0.5,
     max_iter=10000,
-    tol=1e-5,
-    tol_cons=1e-5,
+    tol=1e-3,
+    tol_cons=1e-3,
     verbose=True
 )
 
@@ -96,11 +95,11 @@ solver = GAPTRSolver(
     groups=groups,
     eta=0.1,
     beta=0.5,
-    tau=1e-8,
+    tau=1e-6,
     delta0=1.0,
     eps=5e-3,
     eps_off=1e-6,
-    max_iter=200,
+    max_iter=300,
     amp=1.2,
     damp=0.9,
     escape_radius=4e-2,

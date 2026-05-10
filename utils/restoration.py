@@ -79,24 +79,6 @@ class RestorationNLP:
             self.ub_x,
             [0.0]
         ])
-        # solver objects
-        # nlp = {
-        #     "x": ca.vertcat(z, x, e),
-        #     "f": obj,
-        #     "g": ca.vertcat(*cons),
-        #     "p": y
-        # }
-        # if self.verbose:
-        #     opts = {
-        #         "ipopt.print_level": 5,
-        #         "print_time": True
-        #     }
-        # else:
-        #     opts = {
-        #         "ipopt.print_level": 0,
-        #         "print_time": False
-        #     }
-        # self.solver = ca.nlpsol("restoration", "ipopt", nlp, opts)
         self.nx = nx
         self.nz = nz
 
@@ -205,6 +187,7 @@ class RestorationNLP:
             )
 
         # --- solve ---
+        highs.silent()
         highs.run()
         status = highs.getModelStatus()
         if status != hp.HighsModelStatus.kOptimal:
@@ -212,9 +195,69 @@ class RestorationNLP:
         sol = np.array(highs.getSolution().col_value)
         dz = sol[:nz]
         dx = sol[nz:nz+nx]
-
-        return z_ref + dz, x_ref + dx, 1
-
+        t_pred = sol[-1]
+        return z_ref + dz, x_ref + dx, t_pred
+    
+    def _soc_rhs(self, z0, x0, z1, x1, delta):
+        nx = self.nx
+        m, l = self.problem.m, self.problem.l
+        # Jacobians at ORIGINAL point
+        A0 = self.A_fun(z0).full()
+        P0 = self.P_fun(z0).full()
+        # TRUE residuals at trial point
+        v_true = self.v_fun(z1, x1).full().squeeze()
+        u_true = self.u_fun(z1, x1).full().squeeze()
+        highs = hp.Highs()
+        highs.silent()
+        nvar = nx + 1  # [dx_soc, t]
+        # bounds
+        dx_lb = -delta * np.ones(nx)
+        dx_ub = delta * np.ones(nx)
+        lb = np.concatenate([dx_lb, [0.0]])
+        ub = np.concatenate([dx_ub, [np.inf]])
+        highs.addVars(nvar, lb.astype(np.float64), ub.astype(np.float64))
+        # objective: min t
+        cost = np.zeros(nvar)
+        cost[-1] = 1.0
+        highs.changeColsCost(nvar, np.arange(nvar, dtype=np.int32), cost)
+        # A0 dx <= -v_true + t
+        for i in range(m):
+            row_idx = []
+            row_val = []
+            for j in range(nx):
+                if A0[i, j] != 0.0:
+                    row_idx.append(j)
+                    row_val.append(A0[i, j])
+            row_idx.append(nx)
+            row_val.append(-1.0)
+            highs.addRow(
+                -np.inf,
+                -v_true[i],
+                len(row_idx),
+                np.array(row_idx, dtype=np.int32),
+                np.array(row_val, dtype=np.float64)
+            )
+        # P0 dx = -u_true
+        for i in range(l):
+            row_idx = []
+            row_val = []
+            for j in range(nx):
+                if P0[i, j] != 0.0:
+                    row_idx.append(j)
+                    row_val.append(P0[i, j])
+            highs.addRow(
+                -u_true[i],
+                -u_true[i],
+                len(row_idx),
+                np.array(row_idx, dtype=np.int32),
+                np.array(row_val, dtype=np.float64)
+            )
+        highs.run()
+        if highs.getModelStatus() != hp.HighsModelStatus.kOptimal:
+            return x1, np.inf
+        sol = np.array(highs.getSolution().col_value)
+        dx_soc = sol[:nx]
+        return x1 + dx_soc, sol[-1]
 
     def solve(self, y_k, z_init=None, x_init=None, e_init=0.0):
         """
